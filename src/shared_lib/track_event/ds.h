@@ -132,6 +132,10 @@ class TrackEvent
     UpdateDescriptor(dsd);
   }
 
+  static void Flush() {
+    TrackEvent::Trace([](TrackEvent::TraceContext ctx) { ctx.Flush(); });
+  }
+
   static void CategorySetCallback(struct PerfettoTeCategoryImpl* cat,
                                   PerfettoTeCategoryImplCallback cb,
                                   void* user_arg) {

@@ -41,7 +41,9 @@
 #include "perfetto/public/pb_packed.h"
 #include "perfetto/public/pb_utils.h"
 #include "perfetto/public/producer.h"
+#include "perfetto/public/protos/config/data_source_config.pzc.h"
 #include "perfetto/public/protos/config/trace_config.pzc.h"
+#include "perfetto/public/protos/config/track_event/track_event_config.pzc.h"
 #include "perfetto/public/protos/trace/interned_data/interned_data.pzc.h"
 #include "perfetto/public/protos/trace/test_event.pzc.h"
 #include "perfetto/public/protos/trace/trace.pzc.h"
@@ -50,6 +52,7 @@
 #include "perfetto/public/protos/trace/track_event/track_descriptor.pzc.h"
 #include "perfetto/public/protos/trace/track_event/track_event.pzc.h"
 #include "perfetto/public/protos/trace/trigger.pzc.h"
+#include "perfetto/public/startup_tracing.h"
 #include "perfetto/public/stream_writer.h"
 #include "perfetto/public/te_category_macros.h"
 #include "perfetto/public/te_macros.h"
@@ -1487,6 +1490,15 @@ TEST_F(SharedLibTrackEventTest, TrackEventFastpathOtherDsCatDisabled) {
   EXPECT_FALSE(std::atomic_load(cat3.enabled));
 }
 
+TEST_F(SharedLibTrackEventTest, TrackEventFlush) {
+  TracingSession tracing_session = TracingSession::Builder()
+                                       .set_data_source_name("track_event")
+                                       .add_enabled_category("*")
+                                       .Build();
+  PERFETTO_TE(cat1, PERFETTO_TE_INSTANT("event"));
+  PerfettoTeFlush();
+}
+
 TEST_F(SharedLibTrackEventTest, TrackEventFastpathEmptyConfigDisablesAllCats) {
   ASSERT_FALSE(std::atomic_load(cat1.enabled));
   ASSERT_FALSE(std::atomic_load(cat2.enabled));
@@ -2579,6 +2591,152 @@ TEST_F(SharedLibTrackEventTest, TrackEventIsCategoryEnabled) {
   tracing_session.StopBlocking();
 
   EXPECT_FALSE(PERFETTO_TE_IS_CATEGORY_ENABLED(cat1));
+}
+
+class SharedLibStartupTracingTest : public SharedLibTrackEventTest {
+ public:
+  std::vector<uint8_t> BuildTraceConfig(const char* category) {
+    struct PerfettoPbMsgWriter writer;
+    struct PerfettoHeapBuffer* hb = PerfettoHeapBufferCreate(&writer.writer);
+
+    struct perfetto_protos_TraceConfig cfg;
+    PerfettoPbMsgInit(&cfg.msg, &writer);
+    {
+      struct perfetto_protos_TraceConfig_BufferConfig buffers;
+      perfetto_protos_TraceConfig_begin_buffers(&cfg, &buffers);
+      perfetto_protos_TraceConfig_BufferConfig_set_size_kb(&buffers, 1024);
+      perfetto_protos_TraceConfig_end_buffers(&cfg, &buffers);
+    }
+    {
+      struct perfetto_protos_TraceConfig_DataSource data_sources;
+      perfetto_protos_TraceConfig_begin_data_sources(&cfg, &data_sources);
+      {
+        struct perfetto_protos_DataSourceConfig ds_cfg;
+        perfetto_protos_TraceConfig_DataSource_begin_config(&data_sources,
+                                                            &ds_cfg);
+        perfetto_protos_DataSourceConfig_set_cstr_name(&ds_cfg, "track_event");
+
+        // Set track event config to enable the category.
+        {
+          struct PerfettoPbMsgWriter te_writer;
+          struct PerfettoHeapBuffer* te_hb =
+              PerfettoHeapBufferCreate(&te_writer.writer);
+          struct perfetto_protos_TrackEventConfig te_cfg;
+          PerfettoPbMsgInit(&te_cfg.msg, &te_writer);
+
+          perfetto_protos_TrackEventConfig_set_cstr_disabled_categories(&te_cfg,
+                                                                        "*");
+          perfetto_protos_TrackEventConfig_set_cstr_enabled_categories(
+              &te_cfg, category);
+
+          size_t te_cfg_size =
+              PerfettoStreamWriterGetWrittenSize(&te_writer.writer);
+          std::vector<uint8_t> te_ser(te_cfg_size);
+          PerfettoHeapBufferCopyInto(te_hb, &te_writer.writer, te_ser.data(),
+                                     te_cfg_size);
+          PerfettoHeapBufferDestroy(te_hb, &te_writer.writer);
+
+          PerfettoPbMsgAppendType2Field(
+              &ds_cfg.msg,
+              perfetto_protos_DataSourceConfig_track_event_config_field_number,
+              te_ser.data(), te_ser.size());
+        }
+        perfetto_protos_TraceConfig_DataSource_end_config(&data_sources,
+                                                          &ds_cfg);
+      }
+      perfetto_protos_TraceConfig_end_data_sources(&cfg, &data_sources);
+    }
+
+    size_t cfg_size = PerfettoStreamWriterGetWrittenSize(&writer.writer);
+    std::vector<uint8_t> ser(cfg_size);
+    PerfettoHeapBufferCopyInto(hb, &writer.writer, ser.data(), cfg_size);
+    PerfettoHeapBufferDestroy(hb, &writer.writer);
+    return ser;
+  }
+};
+
+TEST_F(SharedLibStartupTracingTest, SetupStartupTracingBlockingAndAdopt) {
+  std::vector<uint8_t> cfg = BuildTraceConfig("cat1");
+
+  struct PerfettoSetupStartupTracingArgs args =
+      PerfettoSetupStartupTracingArgsDefault();
+  args.backend = PERFETTO_BACKEND_IN_PROCESS;
+
+  struct PerfettoStartupTracingSessionImpl* session =
+      PerfettoSetupStartupTracingBlockingArgs(cfg.data(), cfg.size(), args);
+  ASSERT_NE(session, nullptr);
+
+  // Tracing fast-path should be enabled.
+  EXPECT_TRUE(std::atomic_load(cat1.enabled));
+
+  // Emit startup event.
+  PERFETTO_TE(cat1, PERFETTO_TE_INSTANT("startup_event"));
+
+  // Adopt and start standard session.
+  struct PerfettoTracingSessionImpl* ts =
+      PerfettoTracingSessionCreate(PERFETTO_BACKEND_IN_PROCESS);
+  PerfettoTracingSessionSetup(ts, cfg.data(), cfg.size());
+  PerfettoTracingSessionStartBlocking(ts);
+
+  TracingSession tracing_session = TracingSession::Adopt(ts);
+
+  // Emit another event while active.
+  PERFETTO_TE(cat1, PERFETTO_TE_INSTANT("active_event"));
+
+  tracing_session.StopBlocking();
+  std::vector<uint8_t> data = tracing_session.ReadBlocking();
+
+  bool found_startup = false;
+  bool found_active = false;
+
+  for (struct PerfettoPbDecoderField trace_field : FieldView(data)) {
+    if (trace_field.id == perfetto_protos_Trace_packet_field_number) {
+      IdFieldView track_event(
+          trace_field, perfetto_protos_TracePacket_track_event_field_number);
+      if (track_event.size() == 0) {
+        continue;
+      }
+      IdFieldView name_iid_fields(
+          track_event.front(),
+          perfetto_protos_TrackEvent_name_iid_field_number);
+      if (name_iid_fields.size() == 0) {
+        continue;
+      }
+      uint64_t name_iid = name_iid_fields.front().value.integer64;
+
+      // Match the interned name
+      for (struct PerfettoPbDecoderField interned : FieldView(trace_field)) {
+        if (interned.id ==
+            perfetto_protos_TracePacket_interned_data_field_number) {
+          for (struct PerfettoPbDecoderField ev_name : IdFieldView(
+                   interned,
+                   perfetto_protos_InternedData_event_names_field_number)) {
+            IdFieldView iid_f(ev_name,
+                              perfetto_protos_EventName_iid_field_number);
+            IdFieldView name_f(ev_name,
+                               perfetto_protos_EventName_name_field_number);
+            if (iid_f.size() == 1 &&
+                iid_f.front().value.integer64 == name_iid &&
+                name_f.size() == 1) {
+              std::string name(reinterpret_cast<const char*>(
+                                   name_f.front().value.delimited.start),
+                               name_f.front().value.delimited.len);
+              if (name == "startup_event") {
+                found_startup = true;
+              } else if (name == "active_event") {
+                found_active = true;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  EXPECT_TRUE(found_startup);
+  EXPECT_TRUE(found_active);
+
+  PerfettoStartupTracingSessionDestroy(session);
 }
 
 }  // namespace

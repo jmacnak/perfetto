@@ -15509,6 +15509,7 @@ filegroup {
         "src/shared_lib/heap_buffer.cc",
         "src/shared_lib/pb_decoder.cc",
         "src/shared_lib/producer.cc",
+        "src/shared_lib/startup_tracing.cc",
         "src/shared_lib/stream_writer.cc",
         "src/shared_lib/thread_utils.cc",
         "src/shared_lib/tracing_session.cc",

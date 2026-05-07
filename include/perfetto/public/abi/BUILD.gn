@@ -26,6 +26,7 @@ source_set("public") {
     "heap_buffer.h",
     "pb_decoder_abi.h",
     "producer_abi.h",
+    "startup_tracing_abi.h",
     "stream_writer_abi.h",
     "thread_utils_abi.h",
     "tracing_session_abi.h",

@@ -31,6 +31,9 @@ extern "C" {
 
 PERFETTO_SDK_EXPORT void PerfettoTeInit(void);
 
+// Flushes the track event data source.
+PERFETTO_SDK_EXPORT void PerfettoTeFlush(void);
+
 // The attributes of a single category.
 struct PerfettoTeCategoryDescriptor {
   // The category name. Null terminated string.

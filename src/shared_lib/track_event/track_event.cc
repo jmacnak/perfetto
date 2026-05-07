@@ -45,6 +45,10 @@ void PerfettoTeInit(void) {
       perfetto::internal::TrackRegistry::ComputeProcessUuid();
 }
 
+void PerfettoTeFlush(void) {
+  perfetto::shlib::TrackEvent::Flush();
+}
+
 struct PerfettoTeTimestamp PerfettoTeGetTimestamp(void) {
   struct PerfettoTeTimestamp ret;
   ret.clock_id = PERFETTO_TE_TIMESTAMP_TYPE_BOOT;
